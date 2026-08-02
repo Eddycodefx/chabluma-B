@@ -666,20 +666,7 @@ const gradeColor = (pct) => {
   padding: 0 0 4px;
   scrollbar-width: thin;
   -webkit-overflow-scrolling: touch;
-  scroll-snap-type: both proximity;
-}
 
-.mark-table {
-  min-width: 560px;
-  width: max-content;
-  border-collapse: collapse;
-  font-size: 0.82rem;
-}
-
-.mark-table thead th {
-  text-align: left;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
   letter-spacing: 0;
   text-transform: uppercase;
   color: var(--muted);
