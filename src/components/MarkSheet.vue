@@ -1014,4 +1014,23 @@ tr:hover .row-delete { opacity: 0.5; }
     padding: 16px 24px 0;
   }
 }
+
+@media (max-width: 760px) {
+  .col-admission,
+  .col-name {
+    position: static;
+    left: auto;
+    box-shadow: none;
+    background: inherit;
+  }
+
+  .mark-table {
+    min-width: 100%;
+  }
+
+  .mark-table thead th,
+  .mark-table tbody td {
+    background: rgba(255, 250, 245, 0.94);
+  }
+}
 </style>

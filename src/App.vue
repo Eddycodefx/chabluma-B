@@ -479,8 +479,8 @@ function selectForm(form) {
 .school-name {
   color: #4b607f;
   font-family: var(--font-mono);
-  font-size: 1.90rem;
-  font-weight: 1000;
+  font-size: 1.60rem;
+  font-weight: 800;
   letter-spacing: 0;
   margin: 0;
   text-transform: uppercase;
@@ -488,7 +488,7 @@ function selectForm(form) {
 
 .app-header h1 {
   font-family: var(--font-display);
-  font-size: clamp(2.25rem, 6vw, 4.9rem);
+  font-size: clamp(1.60rem, 6vw, 2.25rem);
   font-weight: 800;
   margin: 0 0 8px;
   letter-spacing: 0;
