@@ -319,13 +319,13 @@ function exportResultsExcel() {
   const rows = resultsReport.value.map(item => {
     const row = {
       Rank: item.rank,
-      Admission: item.admissionNumber || '—',
+      Admission: item.admissionNumber || 'â€”',
       Student: item.name,
       Class: item.classLabel
     }
 
     assessmentColumns.forEach(column => {
-      row[column] = item.assessmentMarks?.[column] || '—'
+      row[column] = item.assessmentMarks?.[column] || 'â€”'
     })
 
     if (assessmentColumns.length > 1) {
@@ -341,99 +341,210 @@ function exportResultsExcel() {
   XLSX.writeFile(workbook, `${(resultsMeta.value?.title || 'results').replace(/\s+/g, '-').toLowerCase()}.xlsx`)
 }
 
-function exportResultsPdf() {
+function filenameSlug(value) {
+  return String(value || 'results')
+    .trim()
+    .replace(/[^\w\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .toLowerCase() || 'results'
+}
+
+function pdfValue(value, fallback = '-') {
+  return value === undefined || value === null || value === '' ? fallback : String(value)
+}
+
+async function imageToDataUrl(src) {
+  try {
+    const response = await fetch(src)
+    const blob = await response.blob()
+
+    return await new Promise(resolve => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result)
+      reader.onerror = () => resolve(null)
+      reader.readAsDataURL(blob)
+    })
+  } catch {
+    return null
+  }
+}
+
+async function exportResultsPdf() {
   if (!resultsReport.value.length) return
 
+  const { jsPDF } = await import('jspdf')
   const assessmentColumns = resultsMeta.value?.assessmentColumns || []
-  const rows = resultsReport.value.map(item => {
-    const cells = [
-      `<td>${item.rank}</td>`,
-      `<td>${item.admissionNumber || '—'}</td>`,
-      `<td>${item.name}</td>`,
-      `<td>${item.classLabel}</td>`
-    ]
+  const subjectName = selectedAssignment.value?.subjectName || resultsMeta.value?.assignmentLabel || 'Report'
+  const teacherName = selectedAssignment.value?.teacherName || teacher.value?.name || '-'
+  const schoolName = 'WENDA HIGH SCHOOL'
+  const title = resultsMeta.value?.title || 'Results'
 
-    assessmentColumns.forEach(column => {
-      cells.push(`<td>${item.assessmentMarks?.[column] || '—'}</td>`)
+  const orientation = assessmentColumns.length > 4 ? 'landscape' : 'portrait'
+  const pdf = new jsPDF({ orientation, unit: 'mm', format: 'a4' })
+  const logoDataUrl = await imageToDataUrl(schoolLogo)
+  const pageWidth = pdf.internal.pageSize.getWidth()
+  const pageHeight = pdf.internal.pageSize.getHeight()
+  const margin = 10
+  const contentWidth = pageWidth - margin * 2
+  const bottom = pageHeight - margin - 8
+  const includeAverage = assessmentColumns.length > 1
+  const columns = [
+    { key: 'rank', label: 'Rank', width: 12, align: 'center' },
+    { key: 'admissionNumber', label: 'Admission', width: 24 },
+    { key: 'name', label: 'Student', width: 44 },
+    { key: 'classLabel', label: 'Class', width: 20 },
+    ...assessmentColumns.map(column => ({ key: column, label: column, width: 16, align: 'center' })),
+    ...(includeAverage ? [{ key: 'average', label: 'Average', width: 18, align: 'center' }] : [])
+  ]
+  const fixedWidth = columns.reduce((sum, column) => sum + column.width, 0)
+
+  if (fixedWidth !== contentWidth) {
+    const flexibleColumns = columns.filter(column => !['rank', 'admissionNumber', 'classLabel', 'average'].includes(column.key))
+    const widthDelta = contentWidth - fixedWidth
+    const perColumnDelta = widthDelta / Math.max(flexibleColumns.length, 1)
+    flexibleColumns.forEach(column => {
+      column.width = Math.max(9, column.width + perColumnDelta)
     })
+  }
 
-    if (assessmentColumns.length > 1) {
-      cells.push(`<td>${item.average}%</td>`)
+  const adjustedWidth = columns.reduce((sum, column) => sum + column.width, 0)
+  if (adjustedWidth > contentWidth) {
+    const scale = contentWidth / adjustedWidth
+    columns.forEach(column => {
+      column.width *= scale
+    })
+  }
+
+  const fontSize = assessmentColumns.length > 8 ? 6.6 : assessmentColumns.length > 4 ? 7.2 : 8
+  const lineHeight = fontSize * 0.42
+  const cellPadding = 1.5
+  let y = margin
+  let pageNumber = 1
+
+  const tableRows = resultsReport.value.map(item => {
+    const row = {
+      rank: pdfValue(item.rank),
+      admissionNumber: pdfValue(item.admissionNumber),
+      name: pdfValue(item.name),
+      classLabel: pdfValue(item.classLabel),
+      average: `${pdfValue(item.average)}%`
     }
 
-    return `<tr>${cells.join('')}</tr>`
-  }).join('')
+    assessmentColumns.forEach(column => {
+      row[column] = pdfValue(item.assessmentMarks?.[column])
+    })
 
-  const subjectName = selectedAssignment.value?.subjectName || resultsMeta.value?.assignmentLabel || 'Report'
-  const teacherName = selectedAssignment.value?.teacherName || teacher.value?.name || '—'
-  const schoolName = 'WENDA HIGH SCHOOL'
-  const html = `<!doctype html>
-    <html>
-      <head>
-        <title>${resultsMeta.value?.title || 'Results'}</title>
-        <style>
-          :root { color-scheme: light; }
-          body { font-family: Arial, sans-serif; margin: 0; padding: 24px; color: #1f2937; background: #fff; }
-          .header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; border-bottom: 2px solid #4b607f; padding-bottom: 12px; }
-          .brand { display: flex; align-items: center; gap: 12px; }
-          .brand img { width: 64px; height: 64px; object-fit: contain; }
-          .brand h1 { margin: 0; font-size: 1.35rem; color: #4b607f; }
-          .meta { font-size: 0.95rem; line-height: 1.5; text-align: right; }
-          .meta strong { display: block; margin-bottom: 4px; }
-          .report-title { margin: 0 0 8px; font-size: 1.25rem; color: #1f2937; }
-          .summary { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; color: #4b607f; font-size: 0.95rem; }
-          .summary span { background: #f5f7fb; padding: 6px 10px; border-radius: 999px; }
-          .print-btn { display: inline-block; margin-bottom: 14px; padding: 8px 12px; border: 0; border-radius: 8px; background: #4b607f; color: white; cursor: pointer; font-weight: 700; }
-          table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-          th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; vertical-align: top; white-space: nowrap; }
-          th { background: #f3f4f6; }
-          tr:nth-child(even) td { background: #fafafa; }
-          @media print { .print-btn { display: none; } }
-        </style>
-      </head>
-      <body>
-        <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
-        <div class="header">
-          <div class="brand">
-            <img src="${schoolLogo}" alt="Wenda High School logo" />
-            <div>
-              <h1>${schoolName}</h1>
-              <div>Academic results report</div>
-            </div>
-          </div>
-          <div class="meta">
-            <strong>${subjectName}</strong>
-            <span>Teacher: ${teacherName}</span>
-          </div>
-        </div>
-        <h2 class="report-title">${resultsMeta.value?.title || 'Results'}</h2>
-        <div class="summary">
-          <span>${resultsMeta.value?.scopeLabel || ''}</span>
-          <span>${resultsMeta.value?.assignmentLabel || ''}</span>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Rank</th>
-              <th>Admission</th>
-              <th>Student</th>
-              <th>Class</th>
-              ${assessmentColumns.map(column => `<th>${column}</th>`).join('')}
-              ${assessmentColumns.length > 1 ? '<th>Average</th>' : ''}
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </body>
-    </html>`
+    return row
+  })
 
-  const printWindow = window.open('', '_blank', 'width=1000,height=800')
-  if (!printWindow) return
+  function drawFirstPageHeader() {
+    if (logoDataUrl) {
+      try {
+        const logoFormat = logoDataUrl.startsWith('data:image/jpeg') ? 'JPEG' : 'PNG'
+        pdf.addImage(logoDataUrl, logoFormat, margin, y, 15, 15)
+      } catch {
+        // Continue exporting the report even if the logo cannot be embedded.
+      }
+    }
 
-  printWindow.document.write(html)
-  printWindow.document.close()
-  printWindow.focus()
-  setTimeout(() => printWindow.print(), 300)
+    pdf.setFont('helvetica', 'bold')
+    pdf.setFontSize(14)
+    pdf.setTextColor(75, 96, 127)
+    pdf.text(schoolName, margin + 19, y + 6)
+    pdf.setFont('helvetica', 'normal')
+    pdf.setFontSize(8.5)
+    pdf.setTextColor(31, 41, 55)
+    pdf.text('Academic results report', margin + 19, y + 11)
+    pdf.text(`Teacher: ${teacherName}`, pageWidth - margin, y + 6, { align: 'right' })
+    pdf.text(subjectName, pageWidth - margin, y + 11, { align: 'right' })
+
+    y += 21
+    pdf.setDrawColor(75, 96, 127)
+    pdf.setLineWidth(0.4)
+    pdf.line(margin, y, pageWidth - margin, y)
+    y += 7
+
+    pdf.setFont('helvetica', 'bold')
+    pdf.setFontSize(12)
+    pdf.text(title, margin, y)
+    y += 6
+    pdf.setFont('helvetica', 'normal')
+    pdf.setFontSize(8)
+    pdf.text(`${resultsMeta.value?.scopeLabel || ''}  |  ${resultsMeta.value?.assignmentLabel || ''}`, margin, y)
+    y += 8
+  }
+
+  function drawTableHeader() {
+    let x = margin
+
+    pdf.setFont('helvetica', 'bold')
+    pdf.setFontSize(fontSize)
+    pdf.setTextColor(31, 41, 55)
+    pdf.setDrawColor(209, 213, 219)
+
+    columns.forEach(column => {
+      pdf.rect(x, y, column.width, 8, 'S')
+      const lines = pdf.splitTextToSize(column.label, column.width - cellPadding * 2)
+      pdf.text(lines.slice(0, 2), x + cellPadding, y + 3.2)
+      x += column.width
+    })
+
+    y += 8
+  }
+
+  function addPage() {
+    pdf.setFont('helvetica', 'normal')
+    pdf.setFontSize(7)
+    pdf.setTextColor(107, 114, 128)
+    pdf.text(`Page ${pageNumber}`, pageWidth - margin, pageHeight - 7, { align: 'right' })
+    pdf.addPage()
+    pageNumber += 1
+    y = margin
+    drawTableHeader()
+  }
+
+  function drawRow(row, rowIndex) {
+    const preparedCells = columns.map(column => {
+      const width = column.width - cellPadding * 2
+      return {
+        column,
+        lines: pdf.splitTextToSize(row[column.key], width)
+      }
+    })
+    const rowHeight = Math.max(7.5, Math.max(...preparedCells.map(cell => cell.lines.length)) * lineHeight + cellPadding * 2)
+
+    if (y + rowHeight > bottom) {
+      addPage()
+    }
+
+    let x = margin
+    pdf.setFont('helvetica', 'normal')
+    pdf.setFontSize(fontSize)
+    pdf.setTextColor(31, 41, 55)
+    pdf.setDrawColor(209, 213, 219)
+
+    preparedCells.forEach(({ column, lines }) => {
+      pdf.rect(x, y, column.width, rowHeight, 'S')
+      const textX = column.align === 'center' ? x + column.width / 2 : x + cellPadding
+      pdf.text(lines, textX, y + cellPadding + lineHeight, {
+        align: column.align || 'left',
+        maxWidth: column.width - cellPadding * 2
+      })
+      x += column.width
+    })
+
+    y += rowHeight
+  }
+
+  drawFirstPageHeader()
+  drawTableHeader()
+  tableRows.forEach(drawRow)
+
+  pdf.setFont('helvetica', 'normal')
+  pdf.setFontSize(7)
+  pdf.setTextColor(107, 114, 128)
+  pdf.text(`Page ${pageNumber}`, pageWidth - margin, pageHeight - 7, { align: 'right' })
+  pdf.save(`${filenameSlug(title)}.pdf`)
 }
 </script>
 
@@ -624,6 +735,8 @@ function exportResultsPdf() {
           :selected-stream="selectedAssignment?.stream || ''"
           :report="resultsReport"
           :meta="resultsMeta"
+          :on-export-excel="exportResultsExcel"
+          :on-export-pdf="exportResultsPdf"
           @close="showResultsModal = false"
           @generate="generateResults"
           @export-excel="exportResultsExcel"

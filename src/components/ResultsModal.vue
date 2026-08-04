@@ -7,7 +7,9 @@ const props = defineProps({
   assignments: { type: Array, default: () => [] },
   selectedStream: { type: String, default: '' },
   report: { type: Array, default: () => [] },
-  meta: { type: Object, default: null }
+  meta: { type: Object, default: null },
+  onExportExcel: { type: Function, default: null },
+  onExportPdf: { type: Function, default: null }
 })
 
 const emit = defineEmits(['close', 'generate', 'export-excel', 'export-pdf'])
@@ -16,6 +18,8 @@ const scope = ref('all')
 const stream = ref(props.selectedStream || 'A')
 const assignmentMode = ref('all')
 const assignmentId = ref(null)
+const exportError = ref('')
+const exportBusy = ref('')
 
 const availableStreams = computed(() => {
   const streams = new Set(props.assignments.filter(item => item.form === props.selectedForm).map(item => item.stream))
@@ -58,6 +62,25 @@ function submit() {
     assignmentId: assignmentMode.value === 'selected' ? assignmentId.value : null
   })
 }
+
+async function runExport(type) {
+  exportError.value = ''
+  exportBusy.value = type
+
+  try {
+    const handler = type === 'excel' ? props.onExportExcel : props.onExportPdf
+    if (handler) {
+      await handler()
+    } else {
+      emit(type === 'excel' ? 'export-excel' : 'export-pdf')
+    }
+  } catch (error) {
+    console.error(error)
+    exportError.value = error?.message || `Could not export ${type.toUpperCase()}`
+  } finally {
+    exportBusy.value = ''
+  }
+}
 </script>
 
 <template>
@@ -95,7 +118,7 @@ function submit() {
         </select>
       </div>
 
-      <button class="btn-primary" :disabled="!selectedForm || !availableAssignments.length" @click="submit">
+      <button type="button" class="btn-primary" :disabled="!selectedForm || !availableAssignments.length" @click="submit">
         Generate results
       </button>
     </div>
@@ -107,10 +130,15 @@ function submit() {
           <h3>{{ meta?.title || 'Results preview' }}</h3>
         </div>
         <div class="preview-actions">
-          <button class="btn-ghost compact" @click="emit('export-excel')">Excel</button>
-          <button class="btn-ghost compact" @click="emit('export-pdf')">PDF</button>
+          <button type="button" class="btn-ghost compact" :disabled="Boolean(exportBusy)" @click="runExport('excel')">
+            {{ exportBusy === 'excel' ? 'Exporting...' : 'Excel' }}
+          </button>
+          <button type="button" class="btn-ghost compact" :disabled="Boolean(exportBusy)" @click="runExport('pdf')">
+            {{ exportBusy === 'pdf' ? 'Exporting...' : 'PDF' }}
+          </button>
         </div>
       </div>
+      <p v-if="exportError" class="export-error">{{ exportError }}</p>
 
       <div class="preview-list">
         <div v-for="row in report.slice(0, 8)" :key="row.studentId" class="preview-row">
@@ -184,6 +212,16 @@ function submit() {
 .preview-actions {
   display: flex;
   gap: 6px;
+}
+
+.export-error {
+  background: rgba(183, 71, 53, 0.1);
+  border: 1px solid rgba(183, 71, 53, 0.18);
+  border-radius: 10px;
+  color: var(--danger);
+  font-size: 0.82rem;
+  margin: 0;
+  padding: 8px 10px;
 }
 
 .preview-list {
