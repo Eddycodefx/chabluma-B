@@ -54,6 +54,7 @@ create table public.assessments (
   id uuid primary key default gen_random_uuid(),
   class_subject_id uuid not null references public.class_subjects(id) on delete cascade,
   label text not null,
+  short_name text,
   max_score numeric not null check (max_score > 0),
   sort_order int not null default 0,
   created_by uuid references auth.users(id) on delete set null,
@@ -95,6 +96,43 @@ as $$
       and role = 'admin'
   );
 $$;
+
+create or replace function public.get_teacher_assignments()
+returns table (
+  id uuid,
+  class_id uuid,
+  subject_name text,
+  teacher_id uuid,
+  color text,
+  created_by uuid,
+  created_at timestamptz,
+  school_classes json
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    cs.id,
+    cs.class_id,
+    cs.subject_name,
+    cs.teacher_id,
+    cs.color,
+    cs.created_by,
+    cs.created_at,
+    json_build_object(
+      'id', sc.id,
+      'form', sc.form,
+      'stream', sc.stream,
+      'created_at', sc.created_at
+    ) as school_classes
+  from public.class_subjects cs
+  join public.school_classes sc on sc.id = cs.class_id
+  where cs.teacher_id = auth.uid()
+     or public.is_admin();
+$$;
+
+grant execute on function public.get_teacher_assignments() to authenticated;
 
 alter table public.teacher_profiles enable row level security;
 alter table public.school_classes enable row level security;
@@ -186,8 +224,8 @@ with check (
   )
 );
 
-create policy "assessments_teacher_update_delete"
-on public.assessments for all
+create policy "assessments_teacher_update"
+on public.assessments for update
 to authenticated
 using (
   public.is_admin()
@@ -199,6 +237,19 @@ using (
   )
 )
 with check (
+  public.is_admin()
+  or exists (
+    select 1
+    from public.class_subjects cs
+    where cs.id = assessments.class_subject_id
+      and cs.teacher_id = auth.uid()
+  )
+);
+
+create policy "assessments_teacher_delete"
+on public.assessments for delete
+to authenticated
+using (
   public.is_admin()
   or exists (
     select 1

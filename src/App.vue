@@ -1,5 +1,6 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
+import * as XLSX from 'xlsx'
 import {
   getTeacherProfile,
   saveTeacherProfile,
@@ -10,7 +11,10 @@ import {
   onAuthStateChange,
   signInWithPassword,
   signUpWithPassword,
-  signOut
+  signOut,
+  getStudents,
+  getAssessments,
+  getGradesForSubject
 } from './db.js'
 import { Swiper, SwiperSlide } from 'swiper/vue'
 import { A11y, Pagination } from 'swiper/modules'
@@ -18,6 +22,7 @@ import 'swiper/css'
 import 'swiper/css/pagination'
 import MarkSheet from './components/MarkSheet.vue'
 import AdminPanel from './components/AdminPanel.vue'
+import ResultsModal from './components/ResultsModal.vue'
 import schoolLogo from './asset/images/logo.png'
 import heroBack from './asset/images/hero-back.jpg'
 
@@ -35,8 +40,17 @@ const authError = ref('')
 const authBusy = ref(false)
 const loading = ref(true)
 const loadError = ref('')
+const showResultsModal = ref(false)
+const resultsReport = ref([])
+const resultsMeta = ref(null)
+const resultsBusy = ref(false)
+const swiperReady = ref(false)
 
-const selectedAssignment = computed(() => assignments.value.find(s => s.id === selectedId.value) || null)
+const selectedAssignment = computed(() => {
+  const currentSelectedId = selectedId.value
+  if (currentSelectedId === null || currentSelectedId === undefined) return null
+  return assignments.value.find(assignment => String(assignment.id) === String(currentSelectedId)) || null
+})
 const selectedForm = computed(() => selectedAssignment.value?.form ?? null)
 const hasTeacherProfile = computed(() => teacher.value && teacher.value.name)
 const isSignedIn = computed(() => Boolean(session.value?.user))
@@ -101,7 +115,7 @@ async function loadAssignments() {
   if (!selectedId.value && assignments.value.length) {
     selectedId.value = assignments.value[0].id
   }
-  if (selectedId.value && !assignments.value.some(assignment => assignment.id === selectedId.value)) {
+  if (selectedId.value && !assignments.value.some(assignment => String(assignment.id) === String(selectedId.value))) {
     selectedId.value = assignments.value.length ? assignments.value[0].id : null
   }
   assignmentStats.value = assignments.value.length
@@ -128,9 +142,13 @@ onMounted(async () => {
   session.value = await getSession()
   await loadAll()
   loading.value = false
+  await nextTick()
+  swiperReady.value = true
   onAuthStateChange(async nextSession => {
     session.value = nextSession
     await loadAll()
+    await nextTick()
+    swiperReady.value = true
   })
 })
 
@@ -186,8 +204,236 @@ async function refreshSelectedSubject() {
 }
 
 function selectForm(form) {
-  const nextAssignment = assignments.value.find(assignment => assignment.form === form)
+  const normalizedForm = String(form)
+  const nextAssignment = assignments.value.find(assignment => String(assignment.form) === normalizedForm)
   if (nextAssignment) selectedId.value = nextAssignment.id
+}
+
+async function generateResults(payload) {
+  if (!selectedAssignment.value || !payload?.form) return
+
+  const scopeAssignments = assignments.value.filter(assignment => {
+    if (assignment.form !== payload.form) return false
+    if (payload.scope === 'stream') return assignment.stream === payload.stream
+    return true
+  })
+
+  const filteredByAssignment = payload.assignmentMode === 'selected'
+    ? scopeAssignments.filter(assignment => assignment.id === payload.assignmentId)
+    : scopeAssignments
+
+  if (!filteredByAssignment.length) {
+    resultsReport.value = []
+    resultsMeta.value = null
+    return
+  }
+
+  resultsBusy.value = true
+  try {
+    const studentMap = new Map()
+    const assessmentColumns = []
+    const seenAssessmentColumns = new Set()
+
+    for (const assignment of filteredByAssignment) {
+      const [students, assessments, grades] = await Promise.all([
+        getStudents(assignment.id),
+        getAssessments(assignment.id),
+        getGradesForSubject(assignment.id)
+      ])
+
+      const gradeIndex = new Map(grades.map(grade => [`${grade.studentId}:${grade.assessmentId}`, grade]))
+
+      for (const student of students) {
+        const entry = studentMap.get(student.id) || {
+          studentId: student.id,
+          admissionNumber: student.admissionNumber,
+          name: student.name,
+          classLabel: `Form ${assignment.form}${assignment.stream}`,
+          stream: assignment.stream,
+          totalPct: 0,
+          count: 0,
+          assessmentMarks: {}
+        }
+
+        let assignmentTotal = 0
+        let assignmentCount = 0
+
+        for (const assessment of assessments) {
+          const grade = gradeIndex.get(`${student.id}:${assessment.id}`)
+          if (grade === undefined || grade.score === null || grade.score === undefined) continue
+          const maxScore = Math.max(Number(assessment.maxScore) || 100, 1)
+          const pct = Math.min(Math.max((Number(grade.score) / maxScore) * 100, 0), 100)
+          const label = assessment.shortName || assessment.label || 'Assessment'
+          assignmentTotal += pct
+          assignmentCount += 1
+
+          if (!seenAssessmentColumns.has(label)) {
+            seenAssessmentColumns.add(label)
+            assessmentColumns.push(label)
+          }
+
+          entry.assessmentMarks[label] = `${Number(pct.toFixed(1))}%`
+        }
+
+        if (assignmentCount) {
+          entry.totalPct += assignmentTotal / assignmentCount
+          entry.count += 1
+        }
+
+        studentMap.set(student.id, entry)
+      }
+    }
+
+    const rows = Array.from(studentMap.values())
+      .filter(entry => entry.count > 0)
+      .map(entry => ({
+        ...entry,
+        average: Number(((entry.totalPct / entry.count) || 0).toFixed(1))
+      }))
+      .sort((a, b) => b.average - a.average || a.name.localeCompare(b.name))
+      .map((entry, index) => ({
+        ...entry,
+        rank: index + 1
+      }))
+
+    resultsReport.value = rows
+    resultsMeta.value = {
+      title: payload.scope === 'stream'
+        ? `Form ${payload.form}${payload.stream} results`
+        : `Form ${payload.form} results`,
+      assignmentLabel: payload.assignmentMode === 'selected'
+        ? filteredByAssignment[0]?.subjectName || 'Selected assignment'
+        : 'All assignments',
+      scopeLabel: payload.scope === 'stream' ? `Stream ${payload.stream}` : 'All streams',
+      assessmentColumns
+    }
+  } finally {
+    resultsBusy.value = false
+  }
+}
+
+function exportResultsExcel() {
+  if (!resultsReport.value.length) return
+
+  const assessmentColumns = resultsMeta.value?.assessmentColumns || []
+  const rows = resultsReport.value.map(item => {
+    const row = {
+      Rank: item.rank,
+      Admission: item.admissionNumber || '—',
+      Student: item.name,
+      Class: item.classLabel
+    }
+
+    assessmentColumns.forEach(column => {
+      row[column] = item.assessmentMarks?.[column] || '—'
+    })
+
+    if (assessmentColumns.length > 1) {
+      row.Average = `${item.average}%`
+    }
+
+    return row
+  })
+
+  const worksheet = XLSX.utils.json_to_sheet(rows)
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Results')
+  XLSX.writeFile(workbook, `${(resultsMeta.value?.title || 'results').replace(/\s+/g, '-').toLowerCase()}.xlsx`)
+}
+
+function exportResultsPdf() {
+  if (!resultsReport.value.length) return
+
+  const assessmentColumns = resultsMeta.value?.assessmentColumns || []
+  const rows = resultsReport.value.map(item => {
+    const cells = [
+      `<td>${item.rank}</td>`,
+      `<td>${item.admissionNumber || '—'}</td>`,
+      `<td>${item.name}</td>`,
+      `<td>${item.classLabel}</td>`
+    ]
+
+    assessmentColumns.forEach(column => {
+      cells.push(`<td>${item.assessmentMarks?.[column] || '—'}</td>`)
+    })
+
+    if (assessmentColumns.length > 1) {
+      cells.push(`<td>${item.average}%</td>`)
+    }
+
+    return `<tr>${cells.join('')}</tr>`
+  }).join('')
+
+  const subjectName = selectedAssignment.value?.subjectName || resultsMeta.value?.assignmentLabel || 'Report'
+  const teacherName = selectedAssignment.value?.teacherName || teacher.value?.name || '—'
+  const schoolName = 'WENDA HIGH SCHOOL'
+  const html = `<!doctype html>
+    <html>
+      <head>
+        <title>${resultsMeta.value?.title || 'Results'}</title>
+        <style>
+          :root { color-scheme: light; }
+          body { font-family: Arial, sans-serif; margin: 0; padding: 24px; color: #1f2937; background: #fff; }
+          .header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; border-bottom: 2px solid #4b607f; padding-bottom: 12px; }
+          .brand { display: flex; align-items: center; gap: 12px; }
+          .brand img { width: 64px; height: 64px; object-fit: contain; }
+          .brand h1 { margin: 0; font-size: 1.35rem; color: #4b607f; }
+          .meta { font-size: 0.95rem; line-height: 1.5; text-align: right; }
+          .meta strong { display: block; margin-bottom: 4px; }
+          .report-title { margin: 0 0 8px; font-size: 1.25rem; color: #1f2937; }
+          .summary { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; color: #4b607f; font-size: 0.95rem; }
+          .summary span { background: #f5f7fb; padding: 6px 10px; border-radius: 999px; }
+          .print-btn { display: inline-block; margin-bottom: 14px; padding: 8px 12px; border: 0; border-radius: 8px; background: #4b607f; color: white; cursor: pointer; font-weight: 700; }
+          table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+          th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; vertical-align: top; white-space: nowrap; }
+          th { background: #f3f4f6; }
+          tr:nth-child(even) td { background: #fafafa; }
+          @media print { .print-btn { display: none; } }
+        </style>
+      </head>
+      <body>
+        <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
+        <div class="header">
+          <div class="brand">
+            <img src="${schoolLogo}" alt="Wenda High School logo" />
+            <div>
+              <h1>${schoolName}</h1>
+              <div>Academic results report</div>
+            </div>
+          </div>
+          <div class="meta">
+            <strong>${subjectName}</strong>
+            <span>Teacher: ${teacherName}</span>
+          </div>
+        </div>
+        <h2 class="report-title">${resultsMeta.value?.title || 'Results'}</h2>
+        <div class="summary">
+          <span>${resultsMeta.value?.scopeLabel || ''}</span>
+          <span>${resultsMeta.value?.assignmentLabel || ''}</span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>Admission</th>
+              <th>Student</th>
+              <th>Class</th>
+              ${assessmentColumns.map(column => `<th>${column}</th>`).join('')}
+              ${assessmentColumns.length > 1 ? '<th>Average</th>' : ''}
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </body>
+    </html>`
+
+  const printWindow = window.open('', '_blank', 'width=1000,height=800')
+  if (!printWindow) return
+
+  printWindow.document.write(html)
+  printWindow.document.close()
+  printWindow.focus()
+  setTimeout(() => printWindow.print(), 300)
 }
 </script>
 
@@ -204,6 +450,8 @@ function selectForm(form) {
      
       <div v-if="hasTeacherProfile" class="assignment-carousel">
         <Swiper
+          v-if="swiperReady && visibleAssignmentCards.length"
+          :key="selectedForm + '-' + visibleAssignmentCards.length"
           :modules="swiperModules"
           :slides-per-view="1.08"
           :space-between="14"
@@ -365,12 +613,31 @@ function selectForm(form) {
           v-if="selectedAssignment"
           :subject="selectedAssignment"
           :can-manage-students="isAdmin"
+          :can-manage-assessments="Boolean(teacher)"
           @changed="refreshSelectedSubject"
         />
-        <div v-else class="no-subjects">
+
+        <ResultsModal
+          v-if="showResultsModal"
+          :selected-form="selectedAssignment?.form || null"
+          :assignments="assignments"
+          :selected-stream="selectedAssignment?.stream || ''"
+          :report="resultsReport"
+          :meta="resultsMeta"
+          @close="showResultsModal = false"
+          @generate="generateResults"
+          @export-excel="exportResultsExcel"
+          @export-pdf="exportResultsPdf"
+        />
+        <!-- <div v-else class="no-subjects">
           <h2>{{ isAdmin ? 'Set up class subjects' : 'No assigned subjects' }}</h2>
-          <p>{{ isAdmin ? 'Create classes and assign subjects to teachers.' : 'Ask an admin to assign a class subject to your account.' }}</p>
-        </div>
+          <p v-if="isAdmin">
+            Create classes and assign subjects to teachers.
+          </p>
+          <p v-else>
+            {{ teacher ? 'This account is not returning any class subjects yet. Make sure the subject is assigned to this teacher in Supabase and the class_subjects policies are active.' : 'Ask an admin to assign a class subject to your account.' }}
+          </p>
+        </div> -->
       </main>
 
       <nav v-if="classTabs.length" class="bottom-class-nav" aria-label="Assigned class navigation">
@@ -384,6 +651,10 @@ function selectForm(form) {
         >
           <span>Form {{ tab.form }}</span>
           <small>{{ tab.streams.join(', ') || 'No stream' }}</small>
+        </button>
+        <button class="class-nav-item results-nav-item" @click="showResultsModal = true">
+          <span>Results</span>
+          <small>Create report</small>
         </button>
       </nav>
     </template>
@@ -825,6 +1096,12 @@ function selectForm(form) {
 
 .class-nav-item.active small {
   color: rgba(255, 250, 245, 0.86);
+}
+
+.results-nav-item {
+  background: rgba(47, 143, 107, 0.12);
+  border-color: rgba(47, 143, 107, 0.24);
+  color: var(--good);
 }
 
 @media (max-width: 620px) {

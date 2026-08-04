@@ -54,6 +54,7 @@ create table public.assessments (
   id uuid primary key default gen_random_uuid(),
   class_subject_id uuid not null references public.class_subjects(id) on delete cascade,
   label text not null,
+  short_name text,
   max_score numeric not null check (max_score > 0),
   sort_order int not null default 0,
   created_by uuid references auth.users(id) on delete set null,

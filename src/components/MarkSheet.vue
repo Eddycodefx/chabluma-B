@@ -11,7 +11,8 @@ import AddAssessmentModal from './AddAssessmentModal.vue'
 
 const props = defineProps({
   subject: { type: Object, required: true },
-  canManageStudents: { type: Boolean, default: false }
+  canManageStudents: { type: Boolean, default: false },
+  canManageAssessments: { type: Boolean, default: true }
 })
 const emit = defineEmits(['changed'])
 
@@ -274,12 +275,26 @@ function downloadTemplate() {
 }
 
 async function handleAddAssessment(payload) {
-  await addAssessment({
+  const createdAssessments = await addAssessment({
     subjectId: props.subject.id,
     label: payload.label,
+    shortName: payload.shortName,
     maxScore: Math.min(Math.max(Number(payload.maxScore) || 100, 1), 100)
   })
-  assessments.value = await getAssessments(props.subject.id)
+
+  const currentSubjectAssessments = (createdAssessments || [])
+    .filter(item => item.subjectId === props.subject.id)
+    .map(item => ({
+      ...item,
+      shortName: payload.shortName,
+      shortLabel: payload.shortName,
+      label: payload.label
+    }))
+
+  assessments.value = [
+    ...assessments.value.filter(item => !currentSubjectAssessments.some(created => created.id === item.id)),
+    ...currentSubjectAssessments
+  ]
   showAddAssessment.value = false
   emit('changed')
 }
@@ -294,6 +309,7 @@ async function removeStudent(student) {
 }
 
 async function removeAssessment(assessment) {
+  if (!props.canManageAssessments) return
   if (!confirm(`Delete the "${assessment.label}" column? This removes every student's mark for it.`)) return
   await deleteAssessment(assessment.id)
   assessments.value = await getAssessments(props.subject.id)
@@ -383,9 +399,10 @@ const gradeColor = (pct) => {
             <th class="col-sex">Sex</th>
             <th v-for="a in assessments" :key="a.id" class="col-assess">
               <div class="assess-head">
-                <span class="assess-label">{{ a.label }}</span>
-                <span class="assess-max">/ {{ a.maxScore }}</span>
-                <button class="col-delete" title="Delete column" @click="removeAssessment(a)">&times;</button>
+                <span class="assess-code">{{ a.shortName || a.shortLabel || '—' }}</span>
+                <button v-if="canManageAssessments" class="col-delete" title="Delete column" @click="removeAssessment(a)">
+                  <span aria-hidden="true">🗑</span>
+                </button>
               </div>
             </th>
             <th class="col-avg">Average</th>
@@ -432,6 +449,13 @@ const gradeColor = (pct) => {
         </tbody>
       </table>
       </div>
+    </div>
+
+    <div v-if="assessments.length" class="assessment-legend">
+      <span v-for="a in assessments" :key="a.id" class="legend-item">
+        <strong>{{ a.shortName || a.shortLabel || '—' }}</strong>
+        <span>{{ a.label }}</span>
+      </span>
     </div>
 
     <div v-if="filteredStudents.length > pageSize" class="pagination-bar">
@@ -680,15 +704,28 @@ const gradeColor = (pct) => {
 }
 
 .mark-table tbody td {
-  padding: 9px 7px;
-  border-bottom: 1px solid rgba(75, 96, 127, 0.1);
+  padding: 10px 8px;
+  border-bottom: 1px solid rgba(75, 96, 127, 0.14);
+  border-right: 1px solid rgba(75, 96, 127, 0.08);
   font-family: var(--font-body);
-  background: rgba(255, 255, 255, 0.38);
+  background: rgba(255, 255, 255, 0.46);
   scroll-snap-align: start;
 }
 
 .mark-table tbody tr:hover {
   background: rgba(243, 112, 30, 0.06);
+}
+
+.mark-table thead th {
+  border-right: 1px solid rgba(75, 96, 127, 0.12);
+  border-bottom: 1px solid rgba(75, 96, 127, 0.16);
+  background: #fffaf5;
+  padding: 10px 8px;
+}
+
+.mark-table thead th:last-child,
+.mark-table tbody td:last-child {
+  border-right: none;
 }
 
 .col-admission {
@@ -725,6 +762,10 @@ tbody .col-name {
   background: #fffaf5;
 }
 
+.mark-table tbody tr:nth-child(even) td {
+  background: rgba(255, 250, 245, 0.76);
+}
+
 thead .col-admission,
 thead .col-name {
   z-index: 7;
@@ -736,23 +777,36 @@ tbody .col-name {
 }
 
 .assess-head {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
   justify-content: center;
+}
+.assess-code {
+  color: var(--brand-blue);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 .assess-max { color: var(--muted); font-weight: 400; text-transform: none; }
 .col-delete {
-  background: none;
-  border: none;
+  align-items: center;
+  background: rgba(183, 71, 53, 0.1);
+  border: 1px solid rgba(183, 71, 53, 0.18);
+  border-radius: 999px;
   color: var(--danger);
-  font-size: 0.95rem;
+  display: inline-flex;
+  font-size: 0.9rem;
+  justify-content: center;
   line-height: 1;
-  opacity: 0;
-  padding: 0 2px;
+  min-height: 24px;
+  min-width: 24px;
+  opacity: 0.9;
+  padding: 0;
 }
-th:hover .col-delete { opacity: 0.6; }
-.col-delete:hover { color: var(--mark) !important; opacity: 1 !important; }
+th:hover .col-delete { opacity: 1; }
+.col-delete:hover { background: rgba(243, 112, 30, 0.16) !important; color: var(--mark) !important; }
 
 .mark-entry {
   align-items: center;
@@ -863,6 +917,35 @@ th:hover .col-delete { opacity: 0.6; }
 }
 tr:hover .row-delete { opacity: 0.5; }
 .row-delete:hover { color: var(--mark) !important; opacity: 1 !important; }
+
+.assessment-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 14px 0;
+}
+
+.legend-item {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(75, 96, 127, 0.14);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 6px;
+  padding: 6px 10px;
+}
+
+.legend-item strong {
+  color: var(--brand-blue);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+}
+
+.legend-item span {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
 
 .pagination-bar {
   align-items: center;

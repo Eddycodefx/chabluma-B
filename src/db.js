@@ -64,6 +64,8 @@ function assessmentFromRow(row) {
     id: row.id,
     subjectId: row.class_subject_id,
     label: row.label,
+    shortName: row.short_name || row.shortName || row.short_label || row.shortLabel || '',
+    shortLabel: row.short_name || row.shortName || row.short_label || row.shortLabel || '',
     maxScore: row.max_score,
     order: row.sort_order,
     createdAt: new Date(row.created_at).getTime()
@@ -83,11 +85,17 @@ function gradeFromRow(row) {
 async function getClassSubject(classSubjectId) {
   const { data, error } = await supabase
     .from('class_subjects')
-    .select('id, class_id')
+    .select('id, class_id, subject_name, school_classes!inner(form)')
     .eq('id', classSubjectId)
     .single()
   throwIfError(error)
-  return data
+  return {
+    id: data.id,
+    class_id: data.class_id,
+    classId: data.class_id,
+    subjectName: data.subject_name,
+    form: data.school_classes?.form
+  }
 }
 
 async function getProfilesByUserIds(userIds) {
@@ -251,10 +259,25 @@ export async function deleteClassSubject(classSubjectId) {
 
 // ---------- Teacher assigned class subjects ----------
 export async function getAssignments() {
-  const { data, error } = await supabase
-    .from('class_subjects')
-    .select('*, school_classes(*)')
-    .order('created_at', { ascending: true })
+  const profile = await getTeacherProfile()
+  const isAdminUser = profile?.role === 'admin'
+
+  let data = []
+  let error = null
+
+  if (!isAdminUser) {
+    const response = await supabase.rpc('get_teacher_assignments')
+    data = response.data || []
+    error = response.error
+  } else {
+    const query = await supabase
+      .from('class_subjects')
+      .select('*, school_classes(*)')
+      .order('created_at', { ascending: true })
+    data = query.data || []
+    error = query.error
+  }
+
   throwIfError(error)
   const teachers = await getProfilesByUserIds(data.map(row => row.teacher_id))
   return data.map(row => classSubjectFromRow(row, teachers.get(row.teacher_id)))
@@ -403,27 +426,59 @@ export async function getAssessments(classSubjectId) {
   return data.map(assessmentFromRow)
 }
 
-export async function addAssessment({ subjectId, label, maxScore }) {
+export async function addAssessment({ subjectId, label, shortName, maxScore }) {
   const userId = await currentUserId()
-  const { count, error: countError } = await supabase
-    .from('assessments')
-    .select('*', { count: 'exact', head: true })
-    .eq('class_subject_id', subjectId)
-  throwIfError(countError)
+  const classSubject = await getClassSubject(subjectId)
 
-  const { data, error } = await supabase
-    .from('assessments')
-    .insert({
-      class_subject_id: subjectId,
+  const { data: sameFormClasses, error: sameFormClassesError } = await supabase
+    .from('school_classes')
+    .select('id')
+    .eq('form', classSubject.form)
+  throwIfError(sameFormClassesError)
+
+  const targetClassIds = (sameFormClasses || []).map(row => row.id)
+  const { data: relatedSubjects, error: relatedSubjectsError } = await supabase
+    .from('class_subjects')
+    .select('id')
+    .eq('subject_name', classSubject.subjectName)
+    .in('class_id', targetClassIds)
+  throwIfError(relatedSubjectsError)
+
+  const targetSubjectIds = (relatedSubjects || []).map(row => row.id)
+  const rows = await Promise.all(targetSubjectIds.map(async (targetSubjectId) => {
+    const { count, error: countError } = await supabase
+      .from('assessments')
+      .select('*', { count: 'exact', head: true })
+      .eq('class_subject_id', targetSubjectId)
+    throwIfError(countError)
+
+    return {
+      class_subject_id: targetSubjectId,
       label,
+      short_name: shortName,
       max_score: maxScore,
       sort_order: count || 0,
       created_by: userId
-    })
+    }
+  }))
+
+  const { data, error } = await supabase
+    .from('assessments')
+    .insert(rows)
     .select('*')
-    .single()
+
+  if (error && /short_name|short_label|column/i.test(error.message || '')) {
+    const fallbackRows = rows.map(({ short_name, ...rest }) => rest)
+    const { data: fallbackData, error: fallbackError } = await supabase
+      .from('assessments')
+      .insert(fallbackRows)
+      .select('*')
+    throwIfError(fallbackError)
+    return (fallbackData || []).map(assessmentFromRow)
+  }
+
   throwIfError(error)
-  return assessmentFromRow(data)
+  return (data || []).map(assessmentFromRow)
 }
 
 export async function deleteAssessment(assessmentId) {
